@@ -1,0 +1,27 @@
+# DAQ settings
+mmconfigfile: "C:/Users/plexus/Desktop/kinetix-DemoStage-mm.cfg"
+DAQ:
+  device_name: 'Dev1'
+  VC_ao_channel: 'ao0'
+  exttrig_counter: 'ctr0'
+  exttrig_counter_channel: 'PFI12'
+  sampling_rate: 10000
+  aotf_laser_dos:
+    "488": "port0/line2"
+    "561": "port0/line3"
+    "595": "port0/line4"
+    "640": "port0/line5"
+    "775": "port0/line6"
+  aotf_blanking_do: "port1/line0"
+
+camera:
+  exposure_time: 0.01
+  binning: 1
+  trigger_mode: 'External'
+  pixel_type: '16bit'
+  pixel_size_um: 6.5
+
+voice_coil:
+  mirror_neutral_voltage: 0.0
+  calibration_file: "C:/Users/plexus/Documents/pymmcore-plus-panASLM/Functions/voice_coil_calibration.csv"
+  
