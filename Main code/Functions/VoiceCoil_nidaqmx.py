@@ -1,3 +1,5 @@
+from logging import config
+
 import nidaqmx
 import numpy as np
 import warnings
@@ -27,6 +29,7 @@ class VoiceCoil_nidaqmx:
     '''
     def __init__(
         self,
+        configs,
         name: str = "Dev1/",
         mirror_neutral_v: float = 0.725,
         cali_path: str = "E:\\2026-6-17\\calibration file_1fps_24ms_2",
@@ -50,29 +53,42 @@ class VoiceCoil_nidaqmx:
         self._all_tasks = []
 
         # These are all default parameters for the purposes of DAQ specifics. These can be defined when calling the class, or changed later.
-        self._daq_sample_rate_hz = sample_rate
-        self._cali_path = cali_path
+        self._daq_sample_rate_hz = configs['DAQ']['sampling_rate'] if configs and 'DAQ' in configs and 'sampling_rate' in configs['DAQ'] else sample_rate
+        self._cali_path = configs['voice_coil']['calibration_path'] if configs and 'voice_coil' in configs and 'calibration_path' in configs['voice_coil'] else cali_path
         self._do_waveform = [np.zeros(1)]
         self._ao_waveform = [np.zeros(1)]
-        self._ao_neutral_positions = [mirror_neutral_v]
+        self._ao_neutral_positions = configs['voice_coil']['mirror_neutral_voltage'] if configs and 'voice_coil' in configs and 'mirror_neutral_voltage' in configs['voice_coil'] else mirror_neutral_v
         self._do_lines = ''
         self._ao_waveform = None
         self._channels_length = 1
         # These are all the pins currently in use of the DAQ. If one wants to change the wiring, they should change the value here. 
         # These are not supposed to be modified by the user, but should only be defined once when wiring is done
-        self._dev_name = name
-        self._address_ao_mirror = 'ao0' #This is the voice coil
-        self._address_do_ctr = 'ctr0' #Trigger that triggers the camera
+        self._dev_name = configs['DAQ']['device_name'] if configs and 'DAQ' in configs and 'device_name' in configs['DAQ'] else name
+
+        # checking if the device is online. If not, it will raise an error.
+        try:
+            with nidaqmx.Task() as task:
+                # Try to add a channel (this will fail if device doesn't exist)
+                task.ai_channels.add_ai_voltage_chan("Dev1/ai0")
+                print("✓ DAQ connection successful!")
+                task.close()
+        except Exception as e:
+            print(f"✗ DAQ connection failed: {e}")
+            raise RuntimeError("DAQ connection failed. Please check the device name and connection.")
+
+        self._address_ao_mirror = configs['DAQ']['VC_ao_channel'] if configs and 'DAQ' in configs and 'VC_ao_channel' in configs['DAQ'] else 'ao0' #This is the voice coil
+        self._address_do_ctr = configs['DAQ']['exttrig_counter'] if configs and 'DAQ' in configs and 'exttrig_counter' in configs['DAQ'] else 'ctr0' #Trigger that triggers the camera
         self._address_do_ctr1 = 'ctr1' # Unused
-        self._address_do_488 = 'port0/line24' #488 nm Laser
-        self._address_do_560 = 'port0/line23' #560 nm Laser
-        self._address_do_595 = 'port0/line20' #595 nm Laser
-        self._address_do_640 = 'port0/line19' #640 nm Laser
-        self._address_do_775 = 'port0/line18' #775 nm Laser (NB: Not currently implemented)
+        self._address_do_lasers = configs['DAQ']['aotf_laser_dos'] if configs and 'DAQ' in configs and 'aotf_laser_dos' in configs['DAQ'] else 'port0/line25' # All lasers
+        self._address_do_488 = self._address_do_lasers['488'] if '488' in self._address_do_lasers else 'port0/line22' #488 nm Laser
+        self._address_do_561 = self._address_do_lasers['561'] if '561' in self._address_do_lasers else 'port0/line23' #561 nm Laser
+        self._address_do_595 = self._address_do_lasers['595'] if '595' in self._address_do_lasers else 'port0/line20' #595 nm Laser
+        self._address_do_640 = self._address_do_lasers['640'] if '640' in self._address_do_lasers else 'port0/line19' #640 nm Laser
+        self._address_do_775 = self._address_do_lasers['775'] if '775' in self._address_do_lasers else 'port0/line18' #775 nm Laser (NB: Not currently implemented)
         self._address_do_ = 'port0/line17' #Arbitrary empty channel, for testing and/or coding exposure pauses in the setup. 
-        self._address_blanking = 'port0/line30' #Global blanking channel
+        self._address_blanking = configs['DAQ']['aotf_blanking_do'] if configs and 'DAQ' in configs and 'aotf_blanking_do' in configs['DAQ'] else 'port0/line30' #Global blanking channel
         self._channel_di_trigger_from_camera_1 = "PFI0" # Currently unused
-        self._channel_co0_output = "PFI12" # Counter 0 output channel for pulse generation to trigger the AO task
+        self._channel_co0_output = configs['DAQ']['exttrig_counter_channel'] if configs and 'DAQ' in configs and 'exttrig_counter_channel' in configs['DAQ'] else "PFI12" # Counter 0 output channel for pulse generation to trigger the AO task
         self._channel_co1_output = "PFI13"
 
         # Task handles. These are set to None by default so we can control if a task has been defined or not. 
@@ -81,7 +97,7 @@ class VoiceCoil_nidaqmx:
         self._task_ao = None
         self._task_do = None
         self._task_do_488 = None
-        self._task_do_560 = None
+        self._task_do_561 = None
         self._task_do_595 = None
         self._task_do_640 = None
         self._task_do_775 = None

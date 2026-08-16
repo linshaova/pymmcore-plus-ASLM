@@ -1,9 +1,3 @@
-#!/usr/bin/env python
-# coding: utf-8
-
-# In[1]:
-
-
 import pymmcore_plus
 from pymmcore_plus import CMMCorePlus
 from useq import MDAEvent
@@ -18,7 +12,6 @@ import queue
 import time
 
 
-# In[2]:
 
 
 class Acquisition:
@@ -72,6 +65,7 @@ class Acquisition:
         self,
         stages_movement, #This is the class that controls the stages. 
         DAQ, #This is the class that controls the DAQ.
+        configs=None,
         config_path: str = r"\Users\Hannah\Desktop\configuration\PVCAM_only.cfg" #The configuration path. For now it's hard coded, though this can be changed to be a parameter in the future.
     ):
         
@@ -97,7 +91,7 @@ class Acquisition:
         self.mmc.enableDebugLog(True)
 
         #print('loading system config') -> This is a debuggin tool to check if __init__ crashes and if so where it does
-        self.mmc.loadSystemConfiguration(config_path)
+        self.mmc.loadSystemConfiguration(configs['mmconfigfile']) if configs and 'mmconfigfile' in configs else config_path
 
         #print('mmc autoshutter is turned off') -> This is a debuggin tool to check if __init__ crashes and if so where it does
         self.mmc.setAutoShutter(False)

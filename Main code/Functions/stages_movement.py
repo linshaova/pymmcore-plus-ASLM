@@ -18,19 +18,34 @@ class stages_movement:
     Axis 1 = Y axis
     Axis 2 = Z axis
     '''
-    def __init__(self):
+    def __init__(self, configs=None):
         '''
         Simple defining boundary and home, along with connecting to the controller
         '''
-        self._controller = Controller(contype='ethernet',n_axes=3)
-        self._controller.connect()
+        try:
+            self._controller = Controller(contype='ethernet',n_axes=3)
+            self._controller.connect()
+        except Exception as e:
+            print(f'controller could not connect: {e}')
+            raise e
         self._boundary = np.array([[-40, 20], [0.5, 18],[-0.5, 5]])
-        self._home = np.array([-20, 6, 0])
-
+        self._home = np.array([-20., 6., 0.])  # Default home position
+        if configs and 'xyz_stages' in configs:
+            if 'needs_commutation' in configs['xyz_stages'] and configs['xyz_stages']['needs_commutation']:
+                acsc.commutate(self._controller.hc, 0)
+                acsc.commutate(self._controller.hc, 1)
+            if all(k in configs['xyz_stages'] for k in ['x_limit_min', 'x_limit_max']):
+                self._boundary[0] = np.array([configs['xyz_stages']['x_limit_min'], configs['xyz_stages']['x_limit_max']])
+            if all(k in configs['xyz_stages'] for k in ['y_limit_min', 'y_limit_max']):
+                self._boundary[1] = np.array([configs['xyz_stages']['y_limit_min'], configs['xyz_stages']['y_limit_max']])
+            if all(k in configs['xyz_stages'] for k in ['z_limit_min', 'z_limit_max']):
+                self._boundary[2] = np.array([configs['xyz_stages']['z_limit_min'], configs['xyz_stages']['z_limit_max']])
+            if all(k in configs['xyz_stages'] for k in ['x_home', 'y_home', 'z_home']):
+                self._home = np.array([configs['xyz_stages']['x_home'], configs['xyz_stages']['y_home'], configs['xyz_stages']['z_home']])
 
     def connect_controller(self):
         '''
-        This has almost never been called but is essentially jsut a way of connecting the controllers again. 
+        This has almost never been called but is essentially just a way of connecting the controllers again. 
         Mostly for debugging purposes
         '''
         try:
