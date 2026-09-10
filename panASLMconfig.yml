@@ -27,7 +27,7 @@ voice_coil:
   mirror_neutral_voltage: 0.0
   calibration_path: "C:/Users/plexus/Documents/pymmcore-plus-panASLM/Functions/voice_coil_calibration.csv"
 
-xyz_stage:
+xyz_stages:
   device_name: 'PI V-508 L-306'
   needs_commutation: True
   x_limit_min: -5.0

@@ -1,4 +1,5 @@
 from logging import config
+import contextlib
 
 import nidaqmx
 import numpy as np
@@ -103,6 +104,8 @@ class VoiceCoil_nidaqmx:
         self._task_do_775 = None
         self._task_do_ = None
         self._blank = None
+        self._calibration_ao_task = None
+        self._calibration_counter_task = None
 
         # Lastly These are currently unused, but are callouts to if the DAQ is running or if the DAQ has setup the save. 
         # This can be added later to avoid errors.
@@ -362,12 +365,85 @@ class VoiceCoil_nidaqmx:
         else:
             self._do_waveform = True
             self._do_lines = f"{self._dev_name}{getattr(self,f"_address_do_{chan}")}"
-        
+
+    def start_calibration_waveform(
+        self,
+        waveform_path: str,
+        down_voltage_offset: float,
+        up_voltage_offset: float,
+        camera_trigger_frequency: float,
+        sample_rate: float = 10000.0,
+    ):
+        """Start the continuous AO and camera-trigger tasks for calibration."""
+        self.stop_calibration_waveform()
+
+        waveform = np.asarray(np.loadtxt(waveform_path), dtype=float).reshape(-1)
+        down_waveform = np.flip(waveform.copy()) + down_voltage_offset
+        up_waveform = waveform.copy() + up_voltage_offset
+        output_waveform = np.concatenate((down_waveform, up_waveform))
+
+        if output_waveform.size == 0:
+            raise ValueError("The waveform file contains no samples.")
+        if camera_trigger_frequency <= 0:
+            raise ValueError("Camera trigger frequency must be greater than zero.")
+
+        device_name = self._dev_name.rstrip("/")
+        ao_address = f"{device_name}/{self._address_ao_mirror}"
+        ao_clock_source = f"/{device_name}/PFI0"
+        counter_address = f"{device_name}/{self._address_do_ctr}"
+
+        ao_task = nidaqmx.Task()
+        counter_task = nidaqmx.Task()
+        try:
+            ao_task.ao_channels.add_ao_voltage_chan(
+                ao_address, self._address_ao_mirror
+            )
+            ao_task.timing.cfg_samp_clk_timing(
+                sample_rate,
+                source=ao_clock_source,
+                sample_mode=nidaqmx.constants.AcquisitionType.CONTINUOUS,
+                samps_per_chan=output_waveform.size,
+            )
+            ao_task.write(output_waveform, auto_start=False)
+
+            counter_task.co_channels.add_co_pulse_chan_freq(
+                counter_address,
+                name_to_assign_to_channel="calibration_camera_trigger",
+                freq=camera_trigger_frequency,
+                duty_cycle=0.1,
+            )
+            counter_task.timing.cfg_implicit_timing(
+                sample_mode=nidaqmx.constants.AcquisitionType.CONTINUOUS
+            )
+
+            ao_task.start()
+            counter_task.start()
+        except Exception:
+            with contextlib.suppress(Exception):
+                counter_task.close()
+            with contextlib.suppress(Exception):
+                ao_task.close()
+            raise
+
+        self._calibration_ao_task = ao_task
+        self._calibration_counter_task = counter_task
+
+    def stop_calibration_waveform(self):
+        """Stop and release the calibration waveform tasks."""
+        for task_name in ("_calibration_counter_task", "_calibration_ao_task"):
+            task = getattr(self, task_name)
+            if task is not None:
+                with contextlib.suppress(Exception):
+                    task.stop()
+                with contextlib.suppress(Exception):
+                    task.close()
+                setattr(self, task_name, None)
 
     #This function is pretty simple. We want to make sure we close each task, so they don't cause problems. 
     #This could be optimized using the self._all_tasks, but havent yet.
     def close(self,
               cameras: int = 1):
+        self.stop_calibration_waveform()
         try:
             self._task_co.close()
         except Exception as e:
