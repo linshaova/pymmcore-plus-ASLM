@@ -1,11 +1,8 @@
 from qtpy.QtWidgets import (
     QDoubleSpinBox,
-    QFileDialog,
     QFormLayout,
-    QLineEdit,
     QMessageBox,
     QPushButton,
-    QVBoxLayout,
     QWidget,
 )
 from qtpy.QtCore import Signal
@@ -18,19 +15,10 @@ class CalibrationAidsWidget(QWidget):
         super().__init__()
         self._daq = daq
 
-        self.waveform_path = QLineEdit()
-        self.waveform_path.setReadOnly(True)
-        browse_button = QPushButton("Browse...")
-        browse_button.clicked.connect(self._select_waveform_file)
-
-        waveform_row = QWidget()
-        waveform_layout = QVBoxLayout(waveform_row)
-        waveform_layout.setContentsMargins(0, 0, 0, 0)
-        waveform_layout.addWidget(self.waveform_path)
-        waveform_layout.addWidget(browse_button)
-
-        self.down_voltage_offset = self._make_offset_input()
-        self.up_voltage_offset = self._make_offset_input()
+        self.down_ramp_high_voltage = self._make_voltage_input(1.25)
+        self.down_ramp_low_voltage = self._make_voltage_input(-1.0)
+        self.up_ramp_high_voltage = self._make_voltage_input(1.25)
+        self.up_ramp_low_voltage = self._make_voltage_input(-1.0)
         self.camera_trigger_frequency = QDoubleSpinBox()
         self.camera_trigger_frequency.setRange(0.001, 100000.0)
         self.camera_trigger_frequency.setDecimals(6)
@@ -42,40 +30,31 @@ class CalibrationAidsWidget(QWidget):
         self.start_waveform_button.toggled.connect(self._toggle_waveform)
 
         layout = QFormLayout(self)
-        layout.addRow("Input waveform file", waveform_row)
-        layout.addRow("Down voltage offset", self.down_voltage_offset)
-        layout.addRow("Up voltage offset", self.up_voltage_offset)
+        layout.addRow("Down ramp high voltage", self.down_ramp_high_voltage)
+        layout.addRow("Down ramp low voltage", self.down_ramp_low_voltage)
+        layout.addRow("Up ramp high voltage", self.up_ramp_high_voltage)
+        layout.addRow("Up ramp low voltage", self.up_ramp_low_voltage)
         layout.addRow("Camera trigger frequency", self.camera_trigger_frequency)
         layout.addRow(self.start_waveform_button)
 
     @staticmethod
-    def _make_offset_input():
+    def _make_voltage_input(value):
         input_box = QDoubleSpinBox()
         input_box.setRange(-1000000.0, 1000000.0)
         input_box.setDecimals(6)
+        input_box.setValue(value)
         input_box.setSingleStep(0.001)
         return input_box
-
-    def _select_waveform_file(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select input waveform file",
-            "",
-            "Waveform files (*.txt *.csv *.dat);;All files (*)",
-        )
-        if path:
-            self.waveform_path.setText(path)
 
     def _toggle_waveform(self, running):
         try:
             if running:
-                if not self.waveform_path.text():
-                    raise ValueError("Select an input waveform file first.")
                 self.waveformToggled.emit(True)
                 self._daq.start_calibration_waveform(
-                    self.waveform_path.text(),
-                    self.down_voltage_offset.value(),
-                    self.up_voltage_offset.value(),
+                    self.down_ramp_high_voltage.value(),
+                    self.down_ramp_low_voltage.value(),
+                    self.up_ramp_high_voltage.value(),
+                    self.up_ramp_low_voltage.value(),
                     self.camera_trigger_frequency.value(),
                 )
             else:

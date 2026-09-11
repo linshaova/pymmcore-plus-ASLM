@@ -32,8 +32,9 @@ class stages_movement:
         self._home = np.array([-20., 6., 0.])  # Default home position
         if configs and 'xyz_stages' in configs:
             if 'needs_commutation' in configs['xyz_stages'] and configs['xyz_stages']['needs_commutation']:
-                acsc.commutate(self._controller.hc, 0)
-                acsc.commutate(self._controller.hc, 1)
+                acsc.command(self._controller.hc, 'start 1, STARTUP')
+                # acsc.commutate(self._controller.hc, 0)
+                # acsc.commutate(self._controller.hc, 1)
             if all(k in configs['xyz_stages'] for k in ['x_limit_min', 'x_limit_max']):
                 self._boundary[0] = np.array([configs['xyz_stages']['x_limit_min'], configs['xyz_stages']['x_limit_max']])
             if all(k in configs['xyz_stages'] for k in ['y_limit_min', 'y_limit_max']):

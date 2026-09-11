@@ -368,28 +368,27 @@ class VoiceCoil_nidaqmx:
 
     def start_calibration_waveform(
         self,
-        waveform_path: str,
-        down_voltage_offset: float,
-        up_voltage_offset: float,
+        down_ramp_high_voltage: float,
+        down_ramp_low_voltage: float,
+        up_ramp_high_voltage: float,
+        up_ramp_low_voltage: float,
         camera_trigger_frequency: float,
         sample_rate: float = 10000.0,
     ):
         """Start the continuous AO and camera-trigger tasks for calibration."""
         self.stop_calibration_waveform()
 
-        waveform = np.asarray(np.loadtxt(waveform_path), dtype=float).reshape(-1)
-        down_waveform = np.flip(waveform.copy()) + down_voltage_offset
-        up_waveform = waveform.copy() + up_voltage_offset
+        down_waveform = np.linspace(
+            down_ramp_high_voltage, down_ramp_low_voltage, 3200
+        )
+        up_waveform = np.linspace(up_ramp_low_voltage, up_ramp_high_voltage, 3200)
         output_waveform = np.concatenate((down_waveform, up_waveform))
-
-        if output_waveform.size == 0:
-            raise ValueError("The waveform file contains no samples.")
         if camera_trigger_frequency <= 0:
             raise ValueError("Camera trigger frequency must be greater than zero.")
 
         device_name = self._dev_name.rstrip("/")
         ao_address = f"{device_name}/{self._address_ao_mirror}"
-        ao_clock_source = f"/{device_name}/PFI0"
+        ao_clock_source = f"/{device_name}/PFI0"  # This comes from Kinetix's "Line Output", used as clock source for the voice coil voltage ramp
         counter_address = f"{device_name}/{self._address_do_ctr}"
 
         ao_task = nidaqmx.Task()
