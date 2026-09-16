@@ -27,6 +27,18 @@ class AcquisitionBridge(QObject):
             filename=cfg.filename,
             foldername=cfg.foldername,
             exposure = cfg.exposure_ms,
+            trigger_mode=cfg.trigger_mode,
+            scan_direction=cfg.scan_direction,
+            scan_mode=cfg.scan_mode,
+            scan_width=cfg.scan_width,
+            port=cfg.port,
+            use_down_up_triangular_waveform=cfg.use_down_up_triangular_waveform,
+            down_ramp_high_voltage=cfg.down_ramp_high_voltage,
+            down_ramp_low_voltage=cfg.down_ramp_low_voltage,
+            up_ramp_high_voltage=cfg.up_ramp_high_voltage,
+            up_ramp_low_voltage=cfg.up_ramp_low_voltage,
+            camera_trigger_frequency=cfg.camera_trigger_frequency,
+            waveform_sample_rate=cfg.waveform_sample_rate,
         )
 
         self.status_message.emit("Setup complete")

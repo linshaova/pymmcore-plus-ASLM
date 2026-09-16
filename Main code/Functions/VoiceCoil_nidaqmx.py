@@ -64,7 +64,7 @@ class VoiceCoil_nidaqmx:
         self._channels_length = 1
         # These are all the pins currently in use of the DAQ. If one wants to change the wiring, they should change the value here. 
         # These are not supposed to be modified by the user, but should only be defined once when wiring is done
-        self._dev_name = configs['DAQ']['device_name'] if configs and 'DAQ' in configs and 'device_name' in configs['DAQ'] else name
+        self._dev_name = configs['DAQ']['device_name']+'/' if configs and 'DAQ' in configs and 'device_name' in configs['DAQ'] else name
 
         # checking if the device is online. If not, it will raise an error.
         try:
@@ -88,7 +88,7 @@ class VoiceCoil_nidaqmx:
         self._address_do_775 = self._address_do_lasers['775'] if '775' in self._address_do_lasers else 'port0/line18' #775 nm Laser (NB: Not currently implemented)
         self._address_do_ = 'port0/line17' #Arbitrary empty channel, for testing and/or coding exposure pauses in the setup. 
         self._address_blanking = configs['DAQ']['aotf_blanking_do'] if configs and 'DAQ' in configs and 'aotf_blanking_do' in configs['DAQ'] else 'port0/line30' #Global blanking channel
-        self._channel_di_trigger_from_camera_1 = "PFI0" # Currently unused
+        self._channel_di_trigger_from_camera_1 = "PFI0" # Currently unused;
         self._channel_co0_output = configs['DAQ']['exttrig_counter_channel'] if configs and 'DAQ' in configs and 'exttrig_counter_channel' in configs['DAQ'] else "PFI12" # Counter 0 output channel for pulse generation to trigger the AO task
         self._channel_co1_output = "PFI13"
 
@@ -106,6 +106,7 @@ class VoiceCoil_nidaqmx:
         self._blank = None
         self._calibration_ao_task = None
         self._calibration_counter_task = None
+        self._generated_waveform_mode = False
 
         # Lastly These are currently unused, but are callouts to if the DAQ is running or if the DAQ has setup the save. 
         # This can be added later to avoid errors.
@@ -197,7 +198,7 @@ class VoiceCoil_nidaqmx:
             )
 
             #This is the saving function in the acqusition code. This is defined and input in the register_save function. 
-            saving_function = self._saving_function
+            saving_function = self._saving_function  # Lin: does each camera need its own saving function? If so, this needs to be modified to accept a list of saving functions.
 
             #We define the callback function.
             # The callback function has the functionality of registering what should happen when a trigger is recieved from the camera.
@@ -238,6 +239,8 @@ class VoiceCoil_nidaqmx:
         cameras: int = 1, #How may cameras are in use
         meta: int = 1 #How many times the acqusition should run
     ):
+        self.stop_calibration_waveform()
+        self._generated_waveform_mode = False
         
         self._channels_length = len(channels)
         #First off we want check if the output pins already ahve a task assigned. If they do, we want to close them to make sure no errors disrupt the code
@@ -366,7 +369,7 @@ class VoiceCoil_nidaqmx:
             self._do_waveform = True
             self._do_lines = f"{self._dev_name}{getattr(self,f"_address_do_{chan}")}"
 
-    def start_calibration_waveform(
+    def configure_generated_waveform(
         self,
         down_ramp_high_voltage: float,
         down_ramp_low_voltage: float,
@@ -375,8 +378,18 @@ class VoiceCoil_nidaqmx:
         camera_trigger_frequency: float,
         sample_rate: float = 10000.0,
     ):
-        """Start the continuous AO and camera-trigger tasks for calibration."""
+        """Construct continuous AO and camera-trigger tasks without starting them."""
         self.stop_calibration_waveform()
+        for task_name in ("_task_co", "_task_co1", "_task_ao", "_task_do", "_blank"):
+            task = getattr(self, task_name)
+            if task is not None:
+                with contextlib.suppress(Exception):
+                    task.stop()
+                with contextlib.suppress(Exception):
+                    task.close()
+                with contextlib.suppress(ValueError):
+                    self._all_tasks.remove(task)
+                setattr(self, task_name, None)
 
         down_waveform = np.linspace(
             down_ramp_high_voltage, down_ramp_low_voltage, 3200
@@ -415,8 +428,6 @@ class VoiceCoil_nidaqmx:
                 sample_mode=nidaqmx.constants.AcquisitionType.CONTINUOUS
             )
 
-            ao_task.start()
-            counter_task.start()
         except Exception:
             with contextlib.suppress(Exception):
                 counter_task.close()
@@ -426,6 +437,28 @@ class VoiceCoil_nidaqmx:
 
         self._calibration_ao_task = ao_task
         self._calibration_counter_task = counter_task
+        self._generated_waveform_mode = True
+
+    def start_calibration_waveform(
+        self,
+        down_ramp_high_voltage: float,
+        down_ramp_low_voltage: float,
+        up_ramp_high_voltage: float,
+        up_ramp_low_voltage: float,
+        camera_trigger_frequency: float,
+        sample_rate: float = 10000.0,
+    ):
+        """Start the continuous AO and camera-trigger tasks for calibration."""
+        self.configure_generated_waveform(
+            down_ramp_high_voltage,
+            down_ramp_low_voltage,
+            up_ramp_high_voltage,
+            up_ramp_low_voltage,
+            camera_trigger_frequency,
+            sample_rate,
+        )
+        self._calibration_ao_task.start()
+        self._calibration_counter_task.start()
 
     def stop_calibration_waveform(self):
         """Stop and release the calibration waveform tasks."""
@@ -437,6 +470,7 @@ class VoiceCoil_nidaqmx:
                 with contextlib.suppress(Exception):
                     task.close()
                 setattr(self, task_name, None)
+        self._generated_waveform_mode = False
 
     #This function is pretty simple. We want to make sure we close each task, so they don't cause problems. 
     #This could be optimized using the self._all_tasks, but havent yet.
@@ -477,7 +511,14 @@ class VoiceCoil_nidaqmx:
     def start(self,
               cameras: int = 1):
         try:
-            self._task_ao.start()
+            if self._generated_waveform_mode:
+                ao_task = self._calibration_ao_task
+                co_task = self._calibration_counter_task
+            else:
+                ao_task = self._task_ao
+                co_task = self._task_co
+
+            ao_task.start()
             if self._channels_length >= 2:
                 self._task_do.start()
             else:
@@ -489,13 +530,14 @@ class VoiceCoil_nidaqmx:
                 task = getattr(self,task_name)
                 task.start()
 
-            self._task_co.start()
+            co_task.start()
+            if not self._generated_waveform_mode:
+                try:
+                    self._blank.write(True,auto_start = True)
+                except Exception as e:
+                    print(f"Could not start blanking: {e}")
         except Exception as e:
             print(f'Could not start tasks: {e}')
-        try:
-            self._blank.write(True,auto_start = True)
-        except Exception as e:
-            print(f"Could not start blanking: {e}")
 
     # this is used to stop all tasks in the DAQ. NB: Stop is not the same as close. Stop just stops the task for now, while close removes the task.
     def pause(self):
@@ -518,6 +560,13 @@ class VoiceCoil_nidaqmx:
 
     def stop(self,
              cameras: int = 1):
+        if self._generated_waveform_mode:
+            for i in range(cameras):
+                task_name = f"_task_di_{i}"
+                with contextlib.suppress(Exception):
+                    getattr(self, task_name).stop()
+            self.stop_calibration_waveform()
+            return
         
         try:
             self._task_co.stop()

@@ -12,7 +12,8 @@ class AcquisitionPanel(QWidget):
     acquisition_running_changed = Signal(bool)   # True when running, False when not
     status_message = Signal(str)                 # optional: forward log text/messages
 
-    def __init__(self, acquisition_controller, parent=None):
+    def __init__(self, acquisition_controller, alignment_aids=None, mmc=None,
+                 camera_device=None, parent=None):
         """
         acquisition_controller: your acquisition object with methods:
           - setup_sequence(config)
@@ -22,6 +23,9 @@ class AcquisitionPanel(QWidget):
         """
         super().__init__(parent)
         self.acq = acquisition_controller
+        self.alignment_aids = alignment_aids
+        self.mmc = mmc
+        self.camera_device = camera_device
         self._running = False
         self._total_frames = 0
 
@@ -68,11 +72,14 @@ class AcquisitionPanel(QWidget):
         save_row.addWidget(browse_btn, 0)
 
         self.ch_488 = QCheckBox("488")
-        self.ch_560 = QCheckBox("560")
+        self.ch_560 = QCheckBox("561")
         self.ch_640 = QCheckBox("640")
         self.ch_488.setChecked(True)
         self.saving = QCheckBox('Saving')
         self.saving.clicked.connect(self._save_toggle)
+        self.use_down_up_triangular_waveform = QCheckBox(
+            "Use triangular down/up waveform"
+        )
 
         ch_row = QHBoxLayout()
         ch_row.addWidget(self.ch_488)
@@ -86,6 +93,7 @@ class AcquisitionPanel(QWidget):
         params_layout.addRow("X tiles", self.X_tiles)
         params_layout.addRow("Y tiles", self.Y_tiles)
         params_layout.addRow("Enabled", self.saving)
+        params_layout.addRow("Waveform mode", self.use_down_up_triangular_waveform)
         params_layout.addRow("Save to", save_row)
         params_layout.addRow("Channels", ch_row)
 
@@ -172,6 +180,28 @@ class AcquisitionPanel(QWidget):
             filename="Zstack",
             foldername="Default",
         )
+        if self.use_down_up_triangular_waveform.isChecked():
+            if self.alignment_aids is None or self.mmc is None or self.camera_device is None:
+                raise RuntimeError("Waveform and camera controls are not available")
+
+            cfg = AcqConfig(
+                **{
+                    **cfg.__dict__,
+                    "use_down_up_triangular_waveform": True,
+                    "down_ramp_high_voltage": self.alignment_aids.down_ramp_high_voltage.value(),
+                    "down_ramp_low_voltage": self.alignment_aids.down_ramp_low_voltage.value(),
+                    "up_ramp_high_voltage": self.alignment_aids.up_ramp_high_voltage.value(),
+                    "up_ramp_low_voltage": self.alignment_aids.up_ramp_low_voltage.value(),
+                    "camera_trigger_frequency": self.alignment_aids.camera_trigger_frequency.value(),
+                    "waveform_sample_rate": self.acq.engine.DAQ_VC.sample_rate,
+                    "exposure_ms": float(self.mmc.getProperty(self.camera_device, "Exposure")),
+                    "trigger_mode": self.mmc.getProperty(self.camera_device, "TriggerMode"),
+                    "scan_direction": "Down/Up Alternate",
+                    "scan_mode": self.mmc.getProperty(self.camera_device, "ScanMode"),
+                    "scan_width": int(float(self.mmc.getProperty(self.camera_device, "ScanWidth"))),
+                    "port": self.mmc.getProperty(self.camera_device, "Port"),
+                }
+            )
         cfg.validate()
         return cfg
     def _set_ui_running(self, running: bool):
@@ -183,6 +213,7 @@ class AcquisitionPanel(QWidget):
         self.ch_488.setEnabled(not running)
         self.ch_560.setEnabled(not running)
         self.ch_640.setEnabled(not running)
+        self.use_down_up_triangular_waveform.setEnabled(not running)
                 
         self.setup_btn.setEnabled(not running)
         self.start_btn.setEnabled(not running)

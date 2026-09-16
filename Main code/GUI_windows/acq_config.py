@@ -27,6 +27,19 @@ class AcqConfig:
     # camera settings you likely want
     exposure_ms: Optional[float] = None  # requires adding support in engine
     trigger_mode: Optional[str] = None   # requires adding support in engine
+    scan_direction: Optional[str] = None
+    scan_mode: Optional[str] = None
+    scan_width: Optional[int] = None
+    port: Optional[str] = None
+
+    # Optional generated waveform settings used by the acquisition mode.
+    use_down_up_triangular_waveform: bool = False
+    down_ramp_high_voltage: float = 1.25
+    down_ramp_low_voltage: float = -1.0
+    up_ramp_high_voltage: float = 1.25
+    up_ramp_low_voltage: float = -1.0
+    camera_trigger_frequency: float = 10.0
+    waveform_sample_rate: float = 10000.0
 
     lag_limit: Optional[int] = None
     silence: Optional[bool] = None
@@ -44,3 +57,8 @@ class AcqConfig:
             raise ValueError("cameras must be >= 1")
         if not self.channels or len(self.channels) == 0:
             raise ValueError("At least one channel is required")
+        if self.use_down_up_triangular_waveform:
+            if self.camera_trigger_frequency <= 0:
+                raise ValueError("camera_trigger_frequency must be > 0")
+            if self.waveform_sample_rate <= 0:
+                raise ValueError("waveform_sample_rate must be > 0")

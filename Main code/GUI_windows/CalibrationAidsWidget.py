@@ -47,6 +47,7 @@ class CalibrationAidsWidget(QWidget):
         return input_box
 
     def _toggle_waveform(self, running):
+        self.start_waveform_button.setText("Stop" if running else "Start waveform")
         try:
             if running:
                 self.waveformToggled.emit(True)
@@ -66,9 +67,6 @@ class CalibrationAidsWidget(QWidget):
             self.start_waveform_button.blockSignals(True)
             self.start_waveform_button.setChecked(False)
             self.start_waveform_button.blockSignals(False)
+            self.start_waveform_button.setText("Start waveform")
             QMessageBox.critical(self, "Waveform error", str(error))
             return
-
-        self.start_waveform_button.setText(
-            "Stop waveform" if running else "Start waveform"
-        )

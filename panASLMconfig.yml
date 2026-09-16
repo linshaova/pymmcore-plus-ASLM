@@ -12,7 +12,7 @@ DAQ:
     "595": "port0/line4"
     "640": "port0/line5"
     "775": "port0/line6"
-  aotf_blanking_do: "port1/line0"
+  aotf_blanking_do: "port1/line1"
 
 camera:
   exposure_time: 1.22 

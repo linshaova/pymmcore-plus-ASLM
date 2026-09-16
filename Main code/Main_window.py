@@ -65,13 +65,6 @@ class MainWindow(QMainWindow):
 
         stage_dock = self._add_dock("Stage Jog", JogPanel(stage), Qt.LeftDockWidgetArea)
         self.acq_bridge = AcquisitionBridge(self.MDA)
-        self.acquisition_panel = AcquisitionPanel(acquisition_controller=self.acq_bridge)
-        acquisition_dock = self._add_dock("Acquisition", self.acquisition_panel, Qt.RightDockWidgetArea)
-
-        self.acquisition_panel.acquisition_running_changed.connect(
-            self.image_frame.set_acquisition_running
-        )
-
         self._camera_device = core.getCameraDevice()
         camera_properties_panel = QWidget()
         camera_properties_layout = QFormLayout(camera_properties_panel)
@@ -96,6 +89,20 @@ class MainWindow(QMainWindow):
             "Camera Properties", camera_properties_panel, Qt.LeftDockWidgetArea
         )
         calibration_aids_widget = CalibrationAidsWidget(DAQ)
+        self.acquisition_panel = AcquisitionPanel(
+            acquisition_controller=self.acq_bridge,
+            alignment_aids=calibration_aids_widget,
+            mmc=core,
+            camera_device=self._camera_device,
+        )
+        acquisition_dock = self._add_dock(
+            "Acquisition", self.acquisition_panel, Qt.RightDockWidgetArea
+        )
+
+        self.acquisition_panel.acquisition_running_changed.connect(
+            self.image_frame.set_acquisition_running
+        )
+
         calibration_aids_widget.waveformToggled.connect(
             self.image_frame.set_waveform_mode
         )

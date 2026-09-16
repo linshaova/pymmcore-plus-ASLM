@@ -119,6 +119,7 @@ class Acquisition:
         self._scan_width = 4 #Scan width of the rolling shutter. Default is 8 for higher intensity. 4 is diffraction limited and should be used for imaging.
         self._scan_direction = 'Up' #Scan direction of the rolling shutter. Down is default for the camera, so this should always be changed to up, UNLESS the scan direction is cahnged for the voice coil. (Current setup is min V to max V)
         self._trigger  = 'Edge Trigger' #The trigger mode. The setup is currently only setup to work in hardware trigger mode. If live features are implemented it should proabably be set to internal trigger.
+        self._scan_mode = 'Scan Width'
         self._Port = 'Dynamic Range' #The port of the camera. Sensitivity is the default for live. Dynamic range is the default for imaging.
         '''
         This is simply just booleans to keep track what code is running. Feel free to add more.
@@ -213,7 +214,7 @@ class Acquisition:
         return getattr(self, "_channels", None)
     @channels.setter
     def channels(self, value: list):
-        if isinstance(value, list) == False:
+        if not isinstance(value, list):
             print("The channels should be a list of strings! This isn't!")
             return
         if all(isinstance(item, str) for item in value):
@@ -638,10 +639,10 @@ class Acquisition:
         Afterwards it logs and the loop continues and wait for the next trigger.  
         '''
         
-        while not self._stop_thread.is_set() == True:
+        while not self._stop_thread.is_set():
 
             #Wait for trigger
-            triggered = self._acquire_event.wait(timeout=2) 
+            triggered = self._acquire_event.wait(timeout=2) # seconds
 
             #timout to prevent infinite loop
             if not triggered:
@@ -698,7 +699,7 @@ class Acquisition:
         ttt = time.perf_counter()
 
         #Check status and stop if necessary
-        if self._count >= self._frames or self.mmc.isSequenceRunning() == False:
+        if self._count >= self._frames or not self.mmc.isSequenceRunning():
             if not self._silence:
                 print('Stopping Acquisition')
             self._file_acquire.write(f"Time: {ttt-self._tstart}. Status of stopping Acquisition: Sequence running? {self.mmc.isSequenceRunning()}. Frames taken vs total frames: {self._count} vs {self._frames}. Total frames acquired: {self._idx_frame}.\n")
@@ -804,10 +805,10 @@ class Acquisition:
         This is kinda unnecessary and should just be removed (calling the individual function in setup and run).
         '''
         self._set_callback()
+        self._save_path()
         if self._save is False:
             print('Saving is not enabled!')
             return
-        self._save_path()
         
         
         
@@ -824,12 +825,12 @@ class Acquisition:
         It can also be used as a way of dividing settings into preview/live mode and acquisition parameters. 
         '''
         for i in range(self._cameras):
+            self.mmc.setProperty(f"Camera-{i+1}",'Port',self._Port)
             self.mmc.setProperty(f"Camera-{i+1}",'Exposure',self._exposure),
             self.mmc.setProperty(f"Camera-{i+1}",'TriggerMode',self._trigger)
-            self.mmc.setProperty(f"Camera-{i+1}",'ScanDirection',self._scan_direction)
-            self.mmc.setProperty(f"Camera-{i+1}",'ScanMode','Scan Width'),
+            self.mmc.setProperty(f"Camera-{i+1}",'ScanMode',self._scan_mode),
             self.mmc.setProperty(f"Camera-{i+1}",'ScanWidth',self._scan_width)
-            self.mmc.setProperty(f"Camera-{i+1}",'Port',self._Port)
+            self.mmc.setProperty(f"Camera-{i+1}",'ScanDirection',self._scan_direction)
             
     def _calculate_frames(self):
         '''
@@ -866,7 +867,18 @@ class Acquisition:
         foldername: str = None,
         exposure: float = None,
         trigger_mode: str = None,
-        lag_limit: int = None
+        lag_limit: int = None,
+        scan_direction: str = None,
+        scan_mode: str = None,
+        scan_width: int = None,
+        port: str = None,
+        use_down_up_triangular_waveform: bool = False,
+        down_ramp_high_voltage: float = 1.25,
+        down_ramp_low_voltage: float = -1.0,
+        up_ramp_high_voltage: float = 1.25,
+        up_ramp_low_voltage: float = -1.0,
+        camera_trigger_frequency: float = 10.0,
+        waveform_sample_rate: float = 10000.0
     ):
         '''
         This is a function that is supposed to be called by the user. 
@@ -901,6 +913,14 @@ class Acquisition:
             self._exposure = exposure
         if trigger_mode is not None:
             self._trigger = trigger_mode
+        if scan_direction is not None:
+            self._scan_direction = scan_direction
+        if scan_mode is not None:
+            self._scan_mode = scan_mode
+        if scan_width is not None:
+            self._scan_width = scan_width
+        if port is not None:
+            self._Port = port
 
         #Run setup functions
         try:
@@ -917,13 +937,23 @@ class Acquisition:
             
             self._setup_camera()
             
-            self._setup_daq()
+            if use_down_up_triangular_waveform:
+                self.DAQ_VC.configure_generated_waveform(
+                    down_ramp_high_voltage,
+                    down_ramp_low_voltage,
+                    up_ramp_high_voltage,
+                    up_ramp_low_voltage,
+                    camera_trigger_frequency,
+                    waveform_sample_rate,
+                )
+            else:
+                self._setup_daq()
         
 
             self._setup = True
         except Exception as e:
             # A catch to make sure that the entire program doesn't crash if something wasn't defined or turned on.
-            print(f"Something failed in the setup {e}")
+            print(f"Something failed in the setup: {e}")
 
 
     def _create_threads(self):
@@ -948,6 +978,7 @@ class Acquisition:
         self._save_thread = None
         if self._save:
             self._save_thread = threading.Thread(target= self._saving_thread, daemon=True)
+
     def run_sequence(
             self,
             X: int = None,
@@ -964,7 +995,7 @@ class Acquisition:
         Here the save path is defined
         The statuses are updated (like self._running)
         The queue is defined
-        The threasd are created
+        The threads are created
         The save files are created
         The log files are created
         The stages are enabled and start position is recorded
@@ -977,7 +1008,7 @@ class Acquisition:
         '''
 
         #Check if it should run
-        if self._setup == False:
+        if not self._setup:
             print('Setup is not done! run MDA.setup_sequence before running it!')
             return
         if self._running:
@@ -1031,7 +1062,8 @@ class Acquisition:
             self._file_save.write(f"stack height: {self._stack_height} \n")
 
         #Make acquire log and start all threads
-        self._file_acquire = open(f"{self._tif_path}_log_acquire.txt",'w')
+        log_path = getattr(self, "_tif_path", Path(self._datestring) / self._filename)
+        self._file_acquire = open(f"{log_path}_log_acquire.txt", 'w')
         self._acquire_thread.start()
         self._jog_thread.start()
         self._stop_sequence_thread.start()
@@ -1161,10 +1193,10 @@ class Acquisition:
         The main purpose is to move the stage in the Z direction, whenever it is triggered. 
         '''
         #Check stop condition
-        while not self._stop_thread.is_set() == True:
+        while not self._stop_thread.is_set():
 
             #wait for trigger
-            triggered = self._jog_event.wait(timeout=len(self._channels)+1) 
+            triggered = self._jog_event.wait(timeout=len(self._channels)+1)  # timeout is in seconds
 
             if not triggered:
                 print('Timeout: no trigger received for jog')
@@ -1219,6 +1251,3 @@ class Acquisition:
         except Exception as e:
             print(f"Could not close DAQ: {e}")       
         self.stages_movement.close()
-
-
-# %%
