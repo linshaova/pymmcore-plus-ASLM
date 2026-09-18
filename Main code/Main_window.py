@@ -1,5 +1,5 @@
 from qtpy.QtWidgets import QFormLayout, QMainWindow, QDockWidget, QSpinBox, QWidget
-from qtpy.QtCore import Qt
+from qtpy.QtCore import QSettings, Qt
 from pymmcore_widgets import PropertyWidget
 
 from GUI_windows.Jog_panel import JogPanel
@@ -54,10 +54,21 @@ class ScanWidthWidget(QWidget):
 
 
 class MainWindow(QMainWindow):
+    _camera_property_names = (
+        "Port",
+        "Exposure",
+        "TriggerMode",
+        "ExposeOutMode",
+        "ScanMode",
+        "ScanDirection",
+    )
+
     def __init__(self, core, DAQ, stage, MDA):
         super().__init__()
         self.setWindowTitle("Light Sheet Control")
         self.DAQ, self.stage, self.MDA = DAQ, stage, MDA
+        self._core = core
+        self._settings = QSettings("pymmcore-plus-panASLM", "Light Sheet Control")
 
         self.image_frame = ImageFrame(core)
         self.setCentralWidget(self.image_frame)
@@ -68,14 +79,7 @@ class MainWindow(QMainWindow):
         self._camera_device = core.getCameraDevice()
         camera_properties_panel = QWidget()
         camera_properties_layout = QFormLayout(camera_properties_panel)
-        for property_name in (
-            "Port",
-            "Exposure",
-            "TriggerMode",
-            "ExposeOutMode",
-            "ScanMode",
-            "ScanDirection",
-        ):
+        for property_name in self._camera_property_names:
             camera_properties_layout.addRow(
                 property_name,
                 PropertyWidget(
@@ -89,6 +93,8 @@ class MainWindow(QMainWindow):
             "Camera Properties", camera_properties_panel, Qt.LeftDockWidgetArea
         )
         calibration_aids_widget = CalibrationAidsWidget(DAQ)
+        self.calibration_aids_widget = calibration_aids_widget
+        self._restore_settings(core, calibration_aids_widget)
         self.acquisition_panel = AcquisitionPanel(
             acquisition_controller=self.acq_bridge,
             alignment_aids=calibration_aids_widget,
@@ -117,6 +123,37 @@ class MainWindow(QMainWindow):
         self.splitDockWidget(camera_prop_dock, calibration_aids_dock, Qt.Vertical)
         self.splitDockWidget(acquisition_dock, console_dock, Qt.Vertical)
 
+    def _restore_settings(self, core, calibration_aids_widget):
+        for property_name in self._camera_property_names:
+            key = f"camera/{property_name}"
+            if self._settings.contains(key):
+                try:
+                    core.setProperty(
+                        self._camera_device,
+                        property_name,
+                        self._settings.value(key),
+                    )
+                except (RuntimeError, ValueError):
+                    pass
+
+        scan_width = self._settings.value("camera/ScanWidth")
+        if scan_width is not None:
+            try:
+                core.setProperty(self._camera_device, "ScanWidth", int(float(scan_width)))
+            except (RuntimeError, ValueError):
+                pass
+
+        for name in (
+            "down_ramp_high_voltage",
+            "down_ramp_low_voltage",
+            "up_ramp_high_voltage",
+            "up_ramp_low_voltage",
+            "camera_trigger_frequency",
+        ):
+            value = self._settings.value(f"calibration/{name}")
+            if value is not None:
+                getattr(calibration_aids_widget, name).setValue(float(value))
+
     def _add_dock(self, title, widget, area):
         dock = QDockWidget(title, self)
         dock.setWidget(widget)
@@ -124,6 +161,7 @@ class MainWindow(QMainWindow):
         return dock
     
     def closeEvent(self, event):
+        self._save_settings()
         self.MDA.close()
 
         print("closeEvent: shutting down console")
@@ -139,3 +177,35 @@ class MainWindow(QMainWindow):
 
         import os
         os._exit(0)
+
+    def _save_settings(self):
+        for property_name in self._camera_property_names:
+            try:
+                self._settings.setValue(
+                    f"camera/{property_name}",
+                    self._core.getProperty(self._camera_device, property_name),
+                )
+            except (RuntimeError, ValueError):
+                pass
+
+        try:
+            self._settings.setValue(
+                "camera/ScanWidth",
+                self._core.getProperty(self._camera_device, "ScanWidth"),
+            )
+        except (RuntimeError, ValueError):
+            pass
+
+        calibration_aids_widget = self.calibration_aids_widget
+        for name in (
+            "down_ramp_high_voltage",
+            "down_ramp_low_voltage",
+            "up_ramp_high_voltage",
+            "up_ramp_low_voltage",
+            "camera_trigger_frequency",
+        ):
+            self._settings.setValue(
+                f"calibration/{name}",
+                getattr(calibration_aids_widget, name).value(),
+            )
+        self._settings.sync()

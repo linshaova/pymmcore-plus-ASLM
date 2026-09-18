@@ -945,6 +945,7 @@ class Acquisition:
                     up_ramp_low_voltage,
                     camera_trigger_frequency,
                     waveform_sample_rate,
+                    channels=self._channels,
                 )
             else:
                 self._setup_daq()

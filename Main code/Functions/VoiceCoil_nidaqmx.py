@@ -88,7 +88,7 @@ class VoiceCoil_nidaqmx:
         self._address_do_775 = self._address_do_lasers['775'] if '775' in self._address_do_lasers else 'port0/line18' #775 nm Laser (NB: Not currently implemented)
         self._address_do_ = 'port0/line17' #Arbitrary empty channel, for testing and/or coding exposure pauses in the setup. 
         self._address_blanking = configs['DAQ']['aotf_blanking_do'] if configs and 'DAQ' in configs and 'aotf_blanking_do' in configs['DAQ'] else 'port0/line30' #Global blanking channel
-        self._channel_di_trigger_from_camera_1 = "PFI0" # Currently unused;
+        self._address_lineout_from_camera = "PFI0" # for triggering VC voltage ramp
         self._channel_co0_output = configs['DAQ']['exttrig_counter_channel'] if configs and 'DAQ' in configs and 'exttrig_counter_channel' in configs['DAQ'] else "PFI12" # Counter 0 output channel for pulse generation to trigger the AO task
         self._channel_co1_output = "PFI13"
 
@@ -346,7 +346,7 @@ class VoiceCoil_nidaqmx:
         if len(channels) >= 2:
             self._do_waveform = np.identity(len(channels), dtype = np.bool_)
             self._do_lines = ''
-            address ="/Dev1/PFI0"
+            address = self._channel_co0_output
             for _n ,chan in enumerate(channels):
                 if _n == 0:
                     self._do_lines += f"{self._dev_name}{getattr(self,f"_address_do_{chan}")}"
@@ -368,6 +368,17 @@ class VoiceCoil_nidaqmx:
         else:
             self._do_waveform = True
             self._do_lines = f"{self._dev_name}{getattr(self,f"_address_do_{chan}")}"
+            # A single digital line still needs its own task.  Previously this
+            # branch only recorded the line and left task creation to
+            # ``start``.  That made the task incomplete (and made it
+            # impossible to configure or write it before starting the DAQ).
+            self._task_do = nidaqmx.Task()
+            self._all_tasks.append(self._task_do)
+            self._task_do.do_channels.add_do_chan(
+                self._do_lines,
+                line_grouping=nidaqmx.constants.LineGrouping.CHAN_FOR_ALL_LINES,
+            )
+            self._task_do.write(self._do_waveform, auto_start=False)
 
     def configure_generated_waveform(
         self,
@@ -377,6 +388,7 @@ class VoiceCoil_nidaqmx:
         up_ramp_low_voltage: float,
         camera_trigger_frequency: float,
         sample_rate: float = 10000.0,
+        channels=None,
     ):
         """Construct continuous AO and camera-trigger tasks without starting them."""
         self.stop_calibration_waveform()
@@ -401,42 +413,83 @@ class VoiceCoil_nidaqmx:
 
         device_name = self._dev_name.rstrip("/")
         ao_address = f"{device_name}/{self._address_ao_mirror}"
-        ao_clock_source = f"/{device_name}/PFI0"  # This comes from Kinetix's "Line Output", used as clock source for the voice coil voltage ramp
+        ao_clock_source = self._address_lineout_from_camera  # This comes from Kinetix's "Line Output", used as clock source for the voice coil voltage ramp
         counter_address = f"{device_name}/{self._address_do_ctr}"
 
-        ao_task = nidaqmx.Task()
-        counter_task = nidaqmx.Task()
+        self._ao_task = nidaqmx.Task()
+        self._co_task = nidaqmx.Task()
+        self._blank = nidaqmx.Task()
+        self._all_tasks.append(self._ao_task)
+        self._all_tasks.append(self._co_task)
+        self._all_tasks.append(self._blank)
+        blank_address = f"{device_name}/{self._address_blanking}"
         try:
-            ao_task.ao_channels.add_ao_voltage_chan(
+            self._ao_task.ao_channels.add_ao_voltage_chan(
                 ao_address, self._address_ao_mirror
             )
-            ao_task.timing.cfg_samp_clk_timing(
+            self._ao_task.timing.cfg_samp_clk_timing(
                 sample_rate,
                 source=ao_clock_source,
                 sample_mode=nidaqmx.constants.AcquisitionType.CONTINUOUS,
                 samps_per_chan=output_waveform.size,
             )
-            ao_task.write(output_waveform, auto_start=False)
+            self._ao_task.write(output_waveform, auto_start=False)
 
-            counter_task.co_channels.add_co_pulse_chan_freq(
+            self._co_task.co_channels.add_co_pulse_chan_freq(
                 counter_address,
                 name_to_assign_to_channel="calibration_camera_trigger",
                 freq=camera_trigger_frequency,
                 duty_cycle=0.1,
             )
-            counter_task.timing.cfg_implicit_timing(
+            self._co_task.timing.cfg_implicit_timing(
                 sample_mode=nidaqmx.constants.AcquisitionType.CONTINUOUS
             )
 
+            self._blank.do_channels.add_do_chan(blank_address)
+
+            if channels is not None:
+                self._channels_length = len(channels)
+                self._do_lines = ",".join(
+                    f"{self._dev_name}{getattr(self, f'_address_do_{channel}')}"
+                    for channel in channels
+                )
+                self._task_do = nidaqmx.Task()
+                if self._channels_length >= 2:
+                    self._do_waveform = np.identity(
+                        self._channels_length, dtype=np.bool_
+                    )
+                    self._task_do.do_channels.add_do_chan(
+                        self._do_lines,
+                        line_grouping=nidaqmx.constants.LineGrouping.CHAN_PER_LINE,
+                    )
+                    self._task_do.timing.cfg_samp_clk_timing(
+                        1000,
+                        source=self._channel_co0_output, #"/Dev1/PFI0",
+                        active_edge=nidaqmx.constants.Edge.RISING,
+                        sample_mode=nidaqmx.constants.AcquisitionType.CONTINUOUS,
+                    )
+                else:
+                    self._do_waveform = True
+                    self._task_do.do_channels.add_do_chan(
+                        self._do_lines,
+                        line_grouping=nidaqmx.constants.LineGrouping.CHAN_FOR_ALL_LINES,
+                    )
+                if self._channels_length >= 2:
+                    self._task_do.write(self._do_waveform, auto_start=False)
+                # if only 1 channel, _task_do does not have a sampling clock and auto_start cannot be False. So  we'll call write() with auto_start=True in start().
+
         except Exception:
             with contextlib.suppress(Exception):
-                counter_task.close()
+                self._co_task.close()
             with contextlib.suppress(Exception):
-                ao_task.close()
+                self._ao_task.close()
+            with contextlib.suppress(Exception):
+                self._task_do.close()
+            self._task_do = None
             raise
 
-        self._calibration_ao_task = ao_task
-        self._calibration_counter_task = counter_task
+        self._calibration_ao_task = self._ao_task
+        self._calibration_counter_task = self._co_task
         self._generated_waveform_mode = True
 
     def start_calibration_waveform(
@@ -476,7 +529,7 @@ class VoiceCoil_nidaqmx:
     #This could be optimized using the self._all_tasks, but havent yet.
     def close(self,
               cameras: int = 1):
-        self.stop_calibration_waveform()
+        # self.stop_calibration_waveform()
         try:
             self._task_co.close()
         except Exception as e:
@@ -519,22 +572,25 @@ class VoiceCoil_nidaqmx:
                 co_task = self._task_co
 
             ao_task.start()
-            if self._channels_length >= 2:
-                self._task_do.start()
-            else:
+            if self._task_do is None:
                 self._task_do = nidaqmx.Task()
-                self._task_do.do_channels.add_do_chan(self._do_lines,line_grouping=nidaqmx.constants.LineGrouping.CHAN_FOR_ALL_LINES)
-                self._task_do.write(self._do_waveform,True)
+                self._task_do.do_channels.add_do_chan(
+                    self._do_lines,
+                    line_grouping=nidaqmx.constants.LineGrouping.CHAN_FOR_ALL_LINES,
+                )
+            self._task_do.start()
+            if self._channels_length < 2:
+                self._task_do.write(self._do_waveform, auto_start=True)
             for i in range(cameras):
                 task_name = f"_task_di_{i}"
                 task = getattr(self,task_name)
                 task.start()
 
             co_task.start()
-            if not self._generated_waveform_mode:
-                try:
+            #if not self._generated_waveform_mode:
+            try:
                     self._blank.write(True,auto_start = True)
-                except Exception as e:
+            except Exception as e:
                     print(f"Could not start blanking: {e}")
         except Exception as e:
             print(f'Could not start tasks: {e}')
@@ -560,13 +616,13 @@ class VoiceCoil_nidaqmx:
 
     def stop(self,
              cameras: int = 1):
-        if self._generated_waveform_mode:
-            for i in range(cameras):
-                task_name = f"_task_di_{i}"
-                with contextlib.suppress(Exception):
-                    getattr(self, task_name).stop()
-            self.stop_calibration_waveform()
-            return
+        # if self._generated_waveform_mode:
+        #     for i in range(cameras):
+        #         task_name = f"_task_di_{i}"
+        #         with contextlib.suppress(Exception):
+        #             getattr(self, task_name).stop()
+        #     self.stop_calibration_waveform()
+        #     return
         
         try:
             self._task_co.stop()
@@ -574,6 +630,8 @@ class VoiceCoil_nidaqmx:
             print(f'Could not stop co task: {e}')
 
         try:
+            if self._channels_length < 2:
+                self._task_do.write(False, auto_start=True)  # would this turn off the lasers?
             self._task_do.stop()
             '''
             if self._channels_length >=  2:
@@ -615,7 +673,7 @@ class VoiceCoil_nidaqmx:
         except Exception as e:
             print(f'Could not stop DI task: {e}')
         try:
-            self._blank.write(False,True)
+            self._blank.write(False, auto_start=True)
         except Exception as e:
             print(f"Blanking did not stop: {e}")
 
