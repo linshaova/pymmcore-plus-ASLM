@@ -46,6 +46,12 @@ class CalibrationAidsWidget(QWidget):
         input_box.setSingleStep(0.001)
         return input_box
 
+    def stop_waveform(self):
+        # Stop the waveform if it is running, exactly as if the button had been
+        # clicked. Used by the acquisition panel, which has to take the DAQ over.
+        if self.start_waveform_button.isChecked():
+            self.start_waveform_button.setChecked(False)
+
     def _toggle_waveform(self, running):
         self.start_waveform_button.setText("Stop" if running else "Start waveform")
         try:

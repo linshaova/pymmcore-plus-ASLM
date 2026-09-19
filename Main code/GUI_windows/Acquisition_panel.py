@@ -214,7 +214,16 @@ class AcquisitionPanel(QWidget):
         self.ch_560.setEnabled(not running)
         self.ch_640.setEnabled(not running)
         self.use_down_up_triangular_waveform.setEnabled(not running)
-                
+
+        # The calibration aids drive the same DAQ tasks the sequence needs, and
+        # their values were already read into the config at setup time. Stop a
+        # running waveform before locking the widget, otherwise the button would
+        # be left reading "Stop" with its tasks torn down underneath it.
+        if self.alignment_aids is not None:
+            if running:
+                self.alignment_aids.stop_waveform()
+            self.alignment_aids.setEnabled(not running)
+
         self.setup_btn.setEnabled(not running)
         self.start_btn.setEnabled(not running)
         self.stop_btn.setEnabled(running)

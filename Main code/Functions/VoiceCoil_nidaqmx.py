@@ -104,8 +104,8 @@ class VoiceCoil_nidaqmx:
         self._task_do_775 = None
         self._task_do_ = None
         self._blank = None
-        self._calibration_ao_task = None
-        self._calibration_counter_task = None
+        # True when the tasks currently in _task_ao/_task_co are the generated
+        # down/up program rather than the calibration-file one.
         self._generated_waveform_mode = False
 
         # Lastly These are currently unused, but are callouts to if the DAQ is running or if the DAQ has setup the save. 
@@ -231,7 +231,164 @@ class VoiceCoil_nidaqmx:
     
     
 
-    # This is the main function that programs all the outputs of the DAQ. 
+    # ------------------------------------------------------------------
+    # Shared plumbing for the two waveform programs
+    # ------------------------------------------------------------------
+    def _release_output_tasks(self):
+        '''
+        Stop, close and forget every output task so a new program can be built.
+        Every path that tears the outputs down goes through here, which is why
+        the generated-waveform flag is cleared here as well: once the handles
+        are gone there is no program of any kind loaded on the board.
+        '''
+        for task_name in ("_task_co", "_task_ao", "_task_do", "_blank"):
+            task = getattr(self, task_name, None)
+            if task is None:
+                continue
+            with contextlib.suppress(Exception):
+                task.stop()
+            with contextlib.suppress(Exception):
+                task.close()
+            with contextlib.suppress(ValueError):
+                self._all_tasks.remove(task)
+            setattr(self, task_name, None)
+        self._generated_waveform_mode = False
+
+    def _program_outputs(
+        self,
+        ao_waveform,
+        *,
+        trigger_frequency: float,
+        channels,
+        ao_sample_rate: float,
+        ao_clock_source: str = None,
+        co_samples: int = None,
+    ):
+        '''
+        Builds every output task the microscope needs: the voice coil ramp on
+        the analog out, the camera master trigger on the counter, the global
+        blanking line, and the per-laser AOTF lines. Nothing is started here.
+
+        ao_clock_source picks between the two programs we run:
+            None          - the onboard clock drives one finite sweep per
+                            waveform, re-triggered by every counter pulse.
+                            This is the calibration-file program.
+            terminal name - the camera's line output clocks the ramp, which
+                            then regenerates continuously. No start trigger is
+                            needed because the camera itself paces it.
+                            This is the generated down/up program.
+
+        co_samples is how many camera triggers to emit. None means continuous.
+        '''
+        if trigger_frequency <= 0:
+            raise ValueError("Camera trigger frequency must be greater than zero.")
+
+        self._release_output_tasks()
+
+        ao_waveform = np.asarray(ao_waveform, dtype=float)
+        self._ao_waveform = ao_waveform
+
+        device = self._dev_name.rstrip("/")
+        ao_address = f"{device}/{self._address_ao_mirror}"
+        co_address = f"{device}/{self._address_do_ctr}"
+        blank_address = f"{device}/{self._address_blanking}"
+        self._co0_address = f"/{device}/{self._channel_co0_output}"
+
+        self._task_ao = nidaqmx.Task()
+        self._task_co = nidaqmx.Task()
+        self._blank = nidaqmx.Task()
+        self._all_tasks += [self._task_ao, self._task_co, self._blank]
+
+        try:
+            # Analog out: the voice coil ramp.
+            self._task_ao.ao_channels.add_ao_voltage_chan(
+                ao_address, self._address_ao_mirror
+            )
+            if ao_clock_source is None:
+                self._task_ao.timing.cfg_samp_clk_timing(
+                    ao_sample_rate,
+                    sample_mode=nidaqmx.constants.AcquisitionType.FINITE,
+                    samps_per_chan=ao_waveform.shape[0],
+                )
+                # PFI12 is the counter output channel, used here to trigger the sweep.
+                self._task_ao.triggers.start_trigger.cfg_dig_edge_start_trig(
+                    self._co0_address, nidaqmx.constants.Edge.RISING
+                )
+                # Very important: without this the sweep would only ever run once.
+                self._task_ao.triggers.start_trigger.retriggerable = True
+            else:
+                self._task_ao.timing.cfg_samp_clk_timing(
+                    ao_sample_rate,
+                    source=ao_clock_source,
+                    sample_mode=nidaqmx.constants.AcquisitionType.CONTINUOUS,
+                    samps_per_chan=ao_waveform.size,
+                )
+            self._task_ao.write(ao_waveform, auto_start=False)
+
+            # Counter out: the camera master trigger.
+            self._task_co.co_channels.add_co_pulse_chan_freq(
+                co_address,
+                name_to_assign_to_channel="pulse_gen",
+                freq=trigger_frequency,
+                duty_cycle=0.1,
+            )
+            if co_samples is None:
+                self._task_co.timing.cfg_implicit_timing(
+                    sample_mode=nidaqmx.constants.AcquisitionType.CONTINUOUS
+                )
+            else:
+                self._task_co.timing.cfg_implicit_timing(
+                    nidaqmx.constants.AcquisitionType.FINITE, co_samples
+                )
+
+            # Digital out: the global blanking line.
+            self._blank.do_channels.add_do_chan(blank_address)
+
+            # Digital out: the per-laser AOTF lines.
+            if channels:
+                self._configure_laser_do(channels)
+        except Exception:
+            # Never leave half-built tasks holding on to the board.
+            self._release_output_tasks()
+            raise
+
+    def _configure_laser_do(self, channels):
+        '''
+        Creates the AOTF line task for the channels in use. The task is not
+        started here, and for a single channel it is not written either: one
+        line has no sample clock, so it can only be written on demand, which
+        start() does with auto_start=True.
+        '''
+        self._channels_length = len(channels)
+        self._do_lines = ",".join(
+            f"{self._dev_name}{getattr(self, f'_address_do_{channel}')}"
+            for channel in channels
+        )
+        self._task_do = nidaqmx.Task()
+        self._all_tasks.append(self._task_do)
+        if self._channels_length >= 2:
+            self._do_waveform = np.identity(self._channels_length, dtype=np.bool_)
+            self._task_do.do_channels.add_do_chan(
+                self._do_lines,
+                line_grouping=nidaqmx.constants.LineGrouping.CHAN_PER_LINE,
+            )
+            self._task_do.timing.cfg_samp_clk_timing(
+                1000,
+                source=self._channel_co0_output,
+                active_edge=nidaqmx.constants.Edge.RISING,
+                sample_mode=nidaqmx.constants.AcquisitionType.CONTINUOUS,
+            )
+            self._task_do.write(self._do_waveform, auto_start=False)
+        else:
+            self._do_waveform = True
+            self._task_do.do_channels.add_do_chan(
+                self._do_lines,
+                line_grouping=nidaqmx.constants.LineGrouping.CHAN_FOR_ALL_LINES,
+            )
+
+    # ------------------------------------------------------------------
+    # The two waveform programs
+    # ------------------------------------------------------------------
     def program_waveforms(
         self,
         stack_height: int,
@@ -239,146 +396,22 @@ class VoiceCoil_nidaqmx:
         cameras: int = 1, #How may cameras are in use
         meta: int = 1 #How many times the acqusition should run
     ):
-        self.stop_calibration_waveform()
-        self._generated_waveform_mode = False
-        
-        self._channels_length = len(channels)
-        #First off we want check if the output pins already ahve a task assigned. If they do, we want to close them to make sure no errors disrupt the code
-        if self._task_co is not None:
-            try:
-                self._task_co.close()
-                self._all_tasks.remove(self._task_co)
-            except Exception as e:
-                print(f'Could not close co task: {e}')
+        '''
+        Programs all the outputs of the DAQ from the calibration file on disk.
 
-        if self._blank is not None:
-            try:
-                self._blank.close()
-                self._all_tasks.remove(self._blank)
-            except Exception as e:
-                print(f"Blanking could not e closed: {e}")
-
-        if self._task_do is not None:
-            try:
-                self._task_do.close()
-                #self._all_tasks.remove(self._task_do)
-            except Exception as e:
-                print(f'Could not close do task: {e}')
-
-        for chan in channels:
-            task = getattr(self,f"_task_do_{chan}")
-            if task is not None:
-                try:
-                    self.task.close()
-                    self._all_tasks.remove(self.task)
-                except Exception as e:
-                    print(f'Could not close do task: {e}')
-
-        if self._task_ao is not None:
-            try:
-                self._task_ao.close()
-                self._all_tasks.remove(self._task_ao)
-            except Exception as e:
-                print(f'Could not close ao task: {e}')
-        
-
-
-        #Now we define the counter output task. This is just defining it as a task and setting up the pin address for it
-        self._task_co = nidaqmx.Task()
-        self._all_tasks.append(self._task_co)
-        co_address = self._dev_name + self._address_do_ctr
-
-
-        self._task_co1 = nidaqmx.Task()
-        self._all_tasks.append(self._task_co1)
-        co1_address = self._dev_name + self._address_do_ctr1
-
-
-        #Now we define the analog output task. This is just defining it as a task and setting up the pin address for it
-        self._task_ao = nidaqmx.Task()
-        self._all_tasks.append(self._task_ao)
-        ao_address = self._dev_name + self._address_ao_mirror
-        
-        self._blank = nidaqmx.Task()
-        self._all_tasks.append(self._blank)
-        blank_address = self._dev_name + self._address_blanking
-
-
-        #First of we define the specifics of the waveforms and frequencies used.
-        # The waveform is loaded in from the calibration path defined.
-        # The frequency is calculated from the calibration file and the sample rate.
-        # Important disclaimer: This code assumes a calibration file with length corresponding to the framerate and the sample rate.
-        # Ex. 1 fps requires 10000 samples at 10000 sample rate. 2 fps requires 5000 and so on. 
-        self._ao_waveform = np.loadtxt(self._cali_path)
-        frequency = self._daq_sample_rate_hz / len(self._ao_waveform)
-        self._co0_address = '/' + self._dev_name + self._channel_co0_output
-        co1PFI_address = '/' + self._dev_name + self._channel_co1_output
-        
-        # Now we define the counter. The frequency is the one that decides the timing. This is calculated automatically as long as the calibration file and sample rate is set correctly
-        #Next we set the timing to be continuous. THis means that it will run until stopped. Optimally later we may want to add it to be finite. 
-        self._task_co.co_channels.add_co_pulse_chan_freq(co_address, name_to_assign_to_channel='pulse_gen', freq=frequency, duty_cycle=0.1)
-        self._task_co.timing.cfg_implicit_timing(
-            nidaqmx.constants.AcquisitionType.FINITE,
-            stack_height
-                                                 )
-        
-
-        #Now we define the analog output channel
-        self._task_ao.ao_channels.add_ao_voltage_chan(ao_address, self._address_ao_mirror)
-        #The timing is dependent on the sample rate. If we want fewer samples on the calibration file the sample rate can be changed. 
-        self._task_ao.timing.cfg_samp_clk_timing(self._daq_sample_rate_hz, 
-                                           sample_mode=nidaqmx.constants.AcquisitionType.FINITE,
-                                           samps_per_chan=self._ao_waveform.shape[0])
-        # PFI12 is the counter output channel; used here for triggering the AO task:
-        self._task_ao.triggers.start_trigger.cfg_dig_edge_start_trig(self._co0_address, nidaqmx.constants.Edge.RISING)
-        #This is a very important settings as it means the sweep can be triggered multiple times. Very important to set to True
-        self._task_ao.triggers.start_trigger.retriggerable = True
-        
-        #Now finally we can write the waveform to the analog pin. The second argument is to inform that it shouldn't start automatically.
-        self._task_ao.write(self._ao_waveform, False)
-
-        self._blank.do_channels.add_do_chan(blank_address)
-
-        #Now we define the digital output task. this is a for loop as its dependent on the individual channels. 
-        #Here we also want to define the task done
-        # This is WIP
-        
-        if len(channels) >= 2:
-            self._do_waveform = np.identity(len(channels), dtype = np.bool_)
-            self._do_lines = ''
-            address = self._channel_co0_output
-            for _n ,chan in enumerate(channels):
-                if _n == 0:
-                    self._do_lines += f"{self._dev_name}{getattr(self,f"_address_do_{chan}")}"
-                else:
-                    self._do_lines += f",{self._dev_name}{getattr(self,f"_address_do_{chan}")}"
-            self._task_do = nidaqmx.Task()
-            self._task_do.do_channels.add_do_chan(self._do_lines,line_grouping=nidaqmx.constants.LineGrouping.CHAN_PER_LINE)
-            self._task_do.timing.cfg_samp_clk_timing(1000,
-                                    source = address,
-                                    active_edge= nidaqmx.constants.Edge.RISING,
-                                    sample_mode=nidaqmx.constants.AcquisitionType.CONTINUOUS)
-            self._task_do.write(self._do_waveform, False)
-            '''
-            self._task_do.triggers.start_trigger.cfg_dig_edge_start_trig(
-            '/Dev1/Ctr0InternalOutput',                               
-            nidaqmx.constants.Edge.RISING
-            )
-            '''
-        else:
-            self._do_waveform = True
-            self._do_lines = f"{self._dev_name}{getattr(self,f"_address_do_{chan}")}"
-            # A single digital line still needs its own task.  Previously this
-            # branch only recorded the line and left task creation to
-            # ``start``.  That made the task incomplete (and made it
-            # impossible to configure or write it before starting the DAQ).
-            self._task_do = nidaqmx.Task()
-            self._all_tasks.append(self._task_do)
-            self._task_do.do_channels.add_do_chan(
-                self._do_lines,
-                line_grouping=nidaqmx.constants.LineGrouping.CHAN_FOR_ALL_LINES,
-            )
-            self._task_do.write(self._do_waveform, auto_start=False)
+        Important disclaimer: this assumes a calibration file whose length
+        corresponds to the framerate and the sample rate. Ex. 1 fps requires
+        10000 samples at a 10000 sample rate, 2 fps requires 5000, and so on.
+        '''
+        waveform = np.loadtxt(self._cali_path)
+        self._program_outputs(
+            waveform,
+            trigger_frequency=self._daq_sample_rate_hz / len(waveform),
+            channels=channels,
+            ao_sample_rate=self._daq_sample_rate_hz,
+            ao_clock_source=None,
+            co_samples=stack_height,
+        )
 
     def configure_generated_waveform(
         self,
@@ -391,105 +424,20 @@ class VoiceCoil_nidaqmx:
         channels=None,
     ):
         """Construct continuous AO and camera-trigger tasks without starting them."""
-        self.stop_calibration_waveform()
-        for task_name in ("_task_co", "_task_co1", "_task_ao", "_task_do", "_blank"):
-            task = getattr(self, task_name)
-            if task is not None:
-                with contextlib.suppress(Exception):
-                    task.stop()
-                with contextlib.suppress(Exception):
-                    task.close()
-                with contextlib.suppress(ValueError):
-                    self._all_tasks.remove(task)
-                setattr(self, task_name, None)
-
-        down_waveform = np.linspace(
-            down_ramp_high_voltage, down_ramp_low_voltage, 3200
+        waveform = np.concatenate((
+            np.linspace(down_ramp_high_voltage, down_ramp_low_voltage, 3200),
+            np.linspace(up_ramp_low_voltage, up_ramp_high_voltage, 3200),
+        ))
+        self._program_outputs(
+            waveform,
+            trigger_frequency=camera_trigger_frequency,
+            channels=channels,
+            ao_sample_rate=sample_rate,
+            # This comes from Kinetix's "Line Output", used as the clock source
+            # for the voice coil voltage ramp.
+            ao_clock_source=self._address_lineout_from_camera,
+            co_samples=None,
         )
-        up_waveform = np.linspace(up_ramp_low_voltage, up_ramp_high_voltage, 3200)
-        output_waveform = np.concatenate((down_waveform, up_waveform))
-        if camera_trigger_frequency <= 0:
-            raise ValueError("Camera trigger frequency must be greater than zero.")
-
-        device_name = self._dev_name.rstrip("/")
-        ao_address = f"{device_name}/{self._address_ao_mirror}"
-        ao_clock_source = self._address_lineout_from_camera  # This comes from Kinetix's "Line Output", used as clock source for the voice coil voltage ramp
-        counter_address = f"{device_name}/{self._address_do_ctr}"
-
-        self._ao_task = nidaqmx.Task()
-        self._co_task = nidaqmx.Task()
-        self._blank = nidaqmx.Task()
-        self._all_tasks.append(self._ao_task)
-        self._all_tasks.append(self._co_task)
-        self._all_tasks.append(self._blank)
-        blank_address = f"{device_name}/{self._address_blanking}"
-        try:
-            self._ao_task.ao_channels.add_ao_voltage_chan(
-                ao_address, self._address_ao_mirror
-            )
-            self._ao_task.timing.cfg_samp_clk_timing(
-                sample_rate,
-                source=ao_clock_source,
-                sample_mode=nidaqmx.constants.AcquisitionType.CONTINUOUS,
-                samps_per_chan=output_waveform.size,
-            )
-            self._ao_task.write(output_waveform, auto_start=False)
-
-            self._co_task.co_channels.add_co_pulse_chan_freq(
-                counter_address,
-                name_to_assign_to_channel="calibration_camera_trigger",
-                freq=camera_trigger_frequency,
-                duty_cycle=0.1,
-            )
-            self._co_task.timing.cfg_implicit_timing(
-                sample_mode=nidaqmx.constants.AcquisitionType.CONTINUOUS
-            )
-
-            self._blank.do_channels.add_do_chan(blank_address)
-
-            if channels is not None:
-                self._channels_length = len(channels)
-                self._do_lines = ",".join(
-                    f"{self._dev_name}{getattr(self, f'_address_do_{channel}')}"
-                    for channel in channels
-                )
-                self._task_do = nidaqmx.Task()
-                if self._channels_length >= 2:
-                    self._do_waveform = np.identity(
-                        self._channels_length, dtype=np.bool_
-                    )
-                    self._task_do.do_channels.add_do_chan(
-                        self._do_lines,
-                        line_grouping=nidaqmx.constants.LineGrouping.CHAN_PER_LINE,
-                    )
-                    self._task_do.timing.cfg_samp_clk_timing(
-                        1000,
-                        source=self._channel_co0_output, #"/Dev1/PFI0",
-                        active_edge=nidaqmx.constants.Edge.RISING,
-                        sample_mode=nidaqmx.constants.AcquisitionType.CONTINUOUS,
-                    )
-                else:
-                    self._do_waveform = True
-                    self._task_do.do_channels.add_do_chan(
-                        self._do_lines,
-                        line_grouping=nidaqmx.constants.LineGrouping.CHAN_FOR_ALL_LINES,
-                    )
-                if self._channels_length >= 2:
-                    self._task_do.write(self._do_waveform, auto_start=False)
-                # if only 1 channel, _task_do does not have a sampling clock and auto_start cannot be False. So  we'll call write() with auto_start=True in start().
-
-        except Exception:
-            with contextlib.suppress(Exception):
-                self._co_task.close()
-            with contextlib.suppress(Exception):
-                self._ao_task.close()
-            with contextlib.suppress(Exception):
-                self._task_do.close()
-            self._task_do = None
-            raise
-
-        self._calibration_ao_task = self._ao_task
-        self._calibration_counter_task = self._co_task
         self._generated_waveform_mode = True
 
     def start_calibration_waveform(
@@ -510,20 +458,13 @@ class VoiceCoil_nidaqmx:
             camera_trigger_frequency,
             sample_rate,
         )
-        self._calibration_ao_task.start()
-        self._calibration_counter_task.start()
+        self._task_ao.start()
+        self._task_co.start()
 
     def stop_calibration_waveform(self):
         """Stop and release the calibration waveform tasks."""
-        for task_name in ("_calibration_counter_task", "_calibration_ao_task"):
-            task = getattr(self, task_name)
-            if task is not None:
-                with contextlib.suppress(Exception):
-                    task.stop()
-                with contextlib.suppress(Exception):
-                    task.close()
-                setattr(self, task_name, None)
-        self._generated_waveform_mode = False
+        if self._generated_waveform_mode:
+            self._release_output_tasks()
 
     #This function is pretty simple. We want to make sure we close each task, so they don't cause problems. 
     #This could be optimized using the self._all_tasks, but havent yet.
@@ -564,14 +505,9 @@ class VoiceCoil_nidaqmx:
     def start(self,
               cameras: int = 1):
         try:
-            if self._generated_waveform_mode:
-                ao_task = self._calibration_ao_task
-                co_task = self._calibration_counter_task
-            else:
-                ao_task = self._task_ao
-                co_task = self._task_co
-
-            ao_task.start()
+            # Both waveform programs now live in the same task handles, so
+            # there is nothing to pick between here.
+            self._task_ao.start()
             if self._task_do is None:
                 self._task_do = nidaqmx.Task()
                 self._task_do.do_channels.add_do_chan(
@@ -586,8 +522,7 @@ class VoiceCoil_nidaqmx:
                 task = getattr(self,task_name)
                 task.start()
 
-            co_task.start()
-            #if not self._generated_waveform_mode:
+            self._task_co.start()
             try:
                     self._blank.write(True,auto_start = True)
             except Exception as e:
