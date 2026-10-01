@@ -448,6 +448,7 @@ class VoiceCoil_nidaqmx:
         up_ramp_low_voltage: float,
         camera_trigger_frequency: float,
         sample_rate: float = 10000.0,
+        channels=['488'],
     ):
         """Start the continuous AO and camera-trigger tasks for calibration."""
         self.configure_generated_waveform(
@@ -457,14 +458,41 @@ class VoiceCoil_nidaqmx:
             up_ramp_low_voltage,
             camera_trigger_frequency,
             sample_rate,
+            channels=channels,
         )
+        # Same order as start(): AO armed, AOTF lines driven, then the master
+        # trigger, and only then unblank, so no light leaves before the lasers
+        # are selected.
         self._task_ao.start()
+        if self._task_do is not None:
+            self._task_do.start()
+            if self._channels_length < 2:
+                self._task_do.write(self._do_waveform, auto_start=True)
         self._task_co.start()
+        try:
+            self._blank.write(True, auto_start=True)
+        except Exception as e:
+            print(f"Could not start blanking: {e}")
 
     def stop_calibration_waveform(self):
         """Stop and release the calibration waveform tasks."""
-        if self._generated_waveform_mode:
-            self._release_output_tasks()
+        if not self._generated_waveform_mode:
+            return
+        # Drive the AOTF lines and the blanking line low before the handles go
+        # away: a closed task leaves its lines latched at the last state written.
+        if self._task_do is not None:
+            try:
+                if self._channels_length < 2:
+                    self._task_do.write(False, auto_start=True)
+                self._task_do.stop()
+            except Exception as e:
+                print(f'Could not stop do task: {e}')
+        if self._blank is not None:
+            try:
+                self._blank.write(False, auto_start=True)
+            except Exception as e:
+                print(f"Blanking did not stop: {e}")
+        self._release_output_tasks()
 
     #This function is pretty simple. We want to make sure we close each task, so they don't cause problems. 
     #This could be optimized using the self._all_tasks, but havent yet.
