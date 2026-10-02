@@ -28,8 +28,8 @@ class JogPanel(QWidget):
 
         self.up_btn.clicked.connect(lambda: self.jog(axis=X_axis, direction=+1))
         self.down_btn.clicked.connect(lambda: self.jog(axis=X_axis, direction=-1))
-        self.left_btn.clicked.connect(lambda: self.jog(axis=Y_axis, direction=-1))
-        self.right_btn.clicked.connect(lambda: self.jog(axis=Y_axis, direction=+1))
+        self.left_btn.clicked.connect(lambda: self.jog(axis=Y_axis, direction=+1))
+        self.right_btn.clicked.connect(lambda: self.jog(axis=Y_axis, direction=-1))
         self.up_z_btn.clicked.connect(lambda: self.jog(axis=Z_axis, direction=+1))
         self.down_z_btn.clicked.connect(lambda: self.jog(axis=Z_axis, direction=-1))
 

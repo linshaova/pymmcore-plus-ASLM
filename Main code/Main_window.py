@@ -70,7 +70,7 @@ class MainWindow(QMainWindow):
         self._core = core
         self._settings = QSettings("pymmcore-plus-panASLM", "Light Sheet Control")
 
-        self.image_frame = ImageFrame(core)
+        self.image_frame = ImageFrame(core, self.DAQ)
         self.setCentralWidget(self.image_frame)
 
 

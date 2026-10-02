@@ -11,6 +11,29 @@ from qtpy.QtWidgets import (
 from pymmcore_widgets import ImagePreview, LiveButton
 
 
+class LiveButtonWithDAQ(LiveButton):
+    """LiveButton that ensures the DAQ laser tasks are configured before live starts."""
+
+    def __init__(self, *, parent=None, mmcore=None, daq=None):
+        self._daq = daq
+        super().__init__(parent=parent, mmcore=mmcore)
+
+    def _toggle_live_mode(self):
+        if self._daq is not None:
+            if self._mmc.isSequenceRunning():
+                super()._toggle_live_mode()
+                self._daq.stop_live_tasks()
+                return
+
+            try:
+                self._daq.start_live_tasks()
+            except Exception as exc:
+                print(f"Could not start Live DAQ tasks: {exc}")
+                return
+
+        super()._toggle_live_mode()
+
+
 class SplitImagePreview(QWidget):
     """Display alternating rolling-shutter frames in two image viewers."""
 
@@ -106,9 +129,10 @@ class SplitImagePreview(QWidget):
 class ImageFrame(QWidget):
     """Image preview with snap/live controls stacked above it."""
 
-    def __init__(self, core):
+    def __init__(self, core, daq=None):
         super().__init__()
         self._core = core
+        self._daq = daq
         self.normal_preview = ImagePreview(mmcore=core)
         self.split_preview = SplitImagePreview(core)
         self.preview_stack = QStackedWidget()
@@ -117,7 +141,7 @@ class ImageFrame(QWidget):
         self.split_preview.set_active(False)
         # There's a pymmcore_widgets bug that clicking Snap button fails to obtain the image via mmc.snap()
         # self.snap_button = SnapButton(mmcore=core)
-        self.live_button = LiveButton(mmcore=core)
+        self.live_button = LiveButtonWithDAQ(mmcore=core, daq=daq)
 
         button_row = QHBoxLayout()
         # button_row.addWidget(self.snap_button)

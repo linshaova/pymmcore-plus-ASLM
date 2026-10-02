@@ -227,9 +227,46 @@ class VoiceCoil_nidaqmx:
         self._saving_function = saving_function
         self._setup_cameras(cameras)
 
-                
-    
-    
+    def ensure_live_tasks(self, channels=None):
+        """Create the live blanking and per-laser DO tasks if they are missing."""
+        if channels is None:
+            channels = ['488']
+
+        if self._blank is None:
+            self._blank = nidaqmx.Task()
+            self._all_tasks.append(self._blank)
+            blank_address = f"{self._dev_name.rstrip('/')}/{self._address_blanking}"
+            self._blank.do_channels.add_do_chan(blank_address)
+
+        if self._task_do is None:
+            self._configure_laser_do(channels)
+
+        return self._task_do, self._blank
+
+    def start_live_tasks(self, channels=None):
+        """Start the live blanking and laser DO tasks, creating them if needed."""
+        self.ensure_live_tasks(channels)
+        if self._task_do is not None:
+            self._task_do.start()
+            if getattr(self, '_channels_length', 1) < 2:
+                self._task_do.write(self._do_waveform, auto_start=True)
+        if self._blank is not None:
+            self._blank.write(True, auto_start=True)
+
+    def stop_live_tasks(self):
+        """Stop the live blanking and laser DO tasks without tearing down the DAQ."""
+        if self._task_do is not None:
+            try:
+                if getattr(self, '_channels_length', 1) < 2:
+                    self._task_do.write(False, auto_start=True)
+                self._task_do.stop()
+            except Exception as exc:
+                print(f'Could not stop live do task: {exc}')
+        if self._blank is not None:
+            try:
+                self._blank.write(False, auto_start=True)
+            except Exception as exc:
+                print(f"Could not stop live blanking: {exc}")
 
     # ------------------------------------------------------------------
     # Shared plumbing for the two waveform programs
