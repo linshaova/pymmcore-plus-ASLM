@@ -1,9 +1,12 @@
 from contextlib import suppress
 
-from qtpy.QtCore import QTimer, Qt
+from qtpy.QtCore import QTimer, Qt, Signal
 from qtpy.QtWidgets import (
+    QDoubleSpinBox,
     QHBoxLayout,
     QLabel,
+    QPushButton,
+    QCheckBox,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -16,6 +19,7 @@ class LiveButtonWithDAQ(LiveButton):
 
     def __init__(self, *, parent=None, mmcore=None, daq=None):
         self._daq = daq
+        self._live_voltage = None
         super().__init__(parent=parent, mmcore=mmcore)
 
     def _toggle_live_mode(self):
@@ -23,15 +27,52 @@ class LiveButtonWithDAQ(LiveButton):
             if self._mmc.isSequenceRunning():
                 super()._toggle_live_mode()
                 self._daq.stop_live_tasks()
+                self._daq.stop_live_ao_voltage()
                 return
 
             try:
                 self._daq.start_live_tasks()
+                if self._live_voltage is not None:
+                    self._daq.set_live_ao_voltage(self._live_voltage.value())
             except Exception as exc:
                 print(f"Could not start Live DAQ tasks: {exc}")
                 return
 
         super()._toggle_live_mode()
+
+
+class AdjustableImagePreview(ImagePreview):
+    """ImagePreview with adjustable low and high display intensity levels."""
+
+    imageRangeChanged = Signal(float, float)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._last_image = None
+        self._manual_clims = None
+
+    def _update_image(self, image):
+        self._last_image = image
+        if self._manual_clims is None:
+            self._clims = "auto"
+        else:
+            self._clims = self._manual_clims
+        super()._update_image(image)
+        if self._manual_clims is None:
+            self.imageRangeChanged.emit(float(image.min()), float(image.max()))
+
+    def set_display_range(self, low, high):
+        if low >= high:
+            return False
+        self._manual_clims = (low, high)
+        self.clims = self._manual_clims
+        return True
+
+    def use_auto_levels(self):
+        self._manual_clims = None
+        self._clims = "auto"
+        if self._last_image is not None:
+            self._update_image(self._last_image)
 
 
 class SplitImagePreview(QWidget):
@@ -43,8 +84,8 @@ class SplitImagePreview(QWidget):
         self._frame_index = 0
         self._enabled = False
 
-        self.down_preview = ImagePreview(mmcore=core, use_with_mda=False)
-        self.up_preview = ImagePreview(mmcore=core, use_with_mda=False)
+        self.down_preview = AdjustableImagePreview(mmcore=core, use_with_mda=False)
+        self.up_preview = AdjustableImagePreview(mmcore=core, use_with_mda=False)
         self._detach_default_updates(self.down_preview)
         self._detach_default_updates(self.up_preview)
 
@@ -133,7 +174,9 @@ class ImageFrame(QWidget):
         super().__init__()
         self._core = core
         self._daq = daq
-        self.normal_preview = ImagePreview(mmcore=core)
+        self._waveform_mode = False
+        self._single_image_viewer = False
+        self.normal_preview = AdjustableImagePreview(mmcore=core)
         self.split_preview = SplitImagePreview(core)
         self.preview_stack = QStackedWidget()
         self.preview_stack.addWidget(self.normal_preview)
@@ -142,15 +185,119 @@ class ImageFrame(QWidget):
         # There's a pymmcore_widgets bug that clicking Snap button fails to obtain the image via mmc.snap()
         # self.snap_button = SnapButton(mmcore=core)
         self.live_button = LiveButtonWithDAQ(mmcore=core, daq=daq)
+        self.live_voltage = QDoubleSpinBox()
+        self.live_voltage.setRange(-2.0, 2.0)
+        self.live_voltage.setDecimals(3)
+        self.live_voltage.setSingleStep(0.001)
+        self.live_voltage.setValue(0.0)
+        self.live_voltage.setKeyboardTracking(False)
+        self.live_button._live_voltage = self.live_voltage
+        self.live_voltage.editingFinished.connect(self._apply_live_ao_voltage)
+
+        self.low_intensity = self._make_intensity_input()
+        self.high_intensity = self._make_intensity_input()
+        self.low_intensity.setValue(0.0)
+        self.high_intensity.setValue(1.0)
+        self.low_intensity.setToolTip("Intensity displayed as black")
+        self.high_intensity.setToolTip("Intensity displayed as white")
+        self.low_intensity.valueChanged.connect(self._apply_intensity_range)
+        self.high_intensity.valueChanged.connect(self._apply_intensity_range)
+        self.auto_levels = QCheckBox("Auto")
+        self.auto_levels.setChecked(True)
+        self.auto_levels.setToolTip(
+            "Automatically use each image's full intensity range"
+        )
+        self.auto_levels.toggled.connect(self._set_auto_levels)
+        self.low_intensity.setEnabled(False)
+        self.high_intensity.setEnabled(False)
 
         button_row = QHBoxLayout()
         # button_row.addWidget(self.snap_button)
         button_row.addWidget(self.live_button)
+        button_row.addWidget(self._make_voltage_label("VC voltage"))
+        button_row.addWidget(self.live_voltage)
         button_row.addStretch()  # pushes buttons left, avoids them stretching full-width
+
+        display_row = QHBoxLayout()
+        display_row.addWidget(QLabel("Low intensity"))
+        display_row.addWidget(self.low_intensity)
+        display_row.addWidget(QLabel("High intensity"))
+        display_row.addWidget(self.high_intensity)
+        display_row.addWidget(self.auto_levels)
+        display_row.addStretch()
 
         layout = QVBoxLayout(self)
         layout.addLayout(button_row)
+        layout.addLayout(display_row)
         layout.addWidget(self.preview_stack)
+
+        for preview in (
+            self.normal_preview,
+            self.split_preview.down_preview,
+            self.split_preview.up_preview,
+        ):
+            preview.imageRangeChanged.connect(self._update_intensity_inputs)
+
+    @staticmethod
+    def _make_intensity_input():
+        input_box = QDoubleSpinBox()
+        input_box.setRange(-1e12, 1e12)
+        input_box.setDecimals(3)
+        input_box.setSingleStep(1.0)
+        input_box.setKeyboardTracking(False)
+        return input_box
+
+    def _update_intensity_inputs(self, low, high):
+        self.low_intensity.blockSignals(True)
+        self.high_intensity.blockSignals(True)
+        self.low_intensity.setValue(low)
+        self.high_intensity.setValue(high if high > low else low + 1.0)
+        self.low_intensity.blockSignals(False)
+        self.high_intensity.blockSignals(False)
+
+    def _apply_intensity_range(self, _value=None):
+        if self.auto_levels.isChecked():
+            return
+        low = self.low_intensity.value()
+        high = self.high_intensity.value()
+        if low >= high:
+            if self.sender() is self.low_intensity:
+                high = low + 1.0
+                self.high_intensity.setValue(high)
+            else:
+                low = high - 1.0
+                self.low_intensity.setValue(low)
+        for preview in (
+            self.normal_preview,
+            self.split_preview.down_preview,
+            self.split_preview.up_preview,
+        ):
+            preview.set_display_range(low, high)
+
+    def _set_auto_levels(self, enabled):
+        self.low_intensity.setEnabled(not enabled)
+        self.high_intensity.setEnabled(not enabled)
+        if enabled:
+            for preview in (
+                self.normal_preview,
+                self.split_preview.down_preview,
+                self.split_preview.up_preview,
+            ):
+                preview.use_auto_levels()
+        else:
+            self._apply_intensity_range()
+
+    @staticmethod
+    def _make_voltage_label(text):
+        label = QLabel(text)
+        label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)
+        return label
+
+    def _apply_live_ao_voltage(self):
+        if self._daq is None or self.live_button is None:
+            return
+        if self._core.isSequenceRunning() and hasattr(self._daq, "set_live_ao_voltage"):
+            self._daq.set_live_ao_voltage(self.live_voltage.value())
 
     def set_split_preview(self, enabled):
         self.preview_stack.setCurrentWidget(
@@ -159,12 +306,17 @@ class ImageFrame(QWidget):
         self.split_preview.set_active(enabled)
 
     def set_waveform_mode(self, enabled):
+        self._waveform_mode = enabled
         if enabled:
             if not self._core.isSequenceRunning():
                 self._core.startContinuousSequenceAcquisition()
         elif self._core.isSequenceRunning():
             self._core.stopSequenceAcquisition()
-        self.set_split_preview(enabled)
+        self.set_split_preview(enabled and not self._single_image_viewer)
+
+    def set_single_image_viewer(self, enabled):
+        self._single_image_viewer = enabled
+        self.set_split_preview(self._waveform_mode and not enabled)
 
     def set_acquisition_running(self, running: bool):
         # 1) Make sure "Live" is off while you acquire

@@ -1,5 +1,5 @@
 from qtpy.QtWidgets import QFormLayout, QMainWindow, QDockWidget, QSpinBox, QWidget
-from qtpy.QtCore import QSettings, Qt
+from qtpy.QtCore import QSettings, Qt, QTimer
 from pymmcore_widgets import PropertyWidget
 
 from GUI_windows.Jog_panel import JogPanel
@@ -72,6 +72,12 @@ class MainWindow(QMainWindow):
 
         self.image_frame = ImageFrame(core, self.DAQ)
         self.setCentralWidget(self.image_frame)
+        screen = self.screen().geometry() if self.screen() else None
+        if screen is not None:
+            target_width = int(screen.width() * 0.75)
+            target_height = int(screen.height() * 0.8)
+            self.resize(target_width, target_height)
+            QTimer.singleShot(0, lambda: self.move(screen.x(), screen.y() + 20))
 
 
         stage_dock = self._add_dock("Stage Jog", JogPanel(stage), Qt.LeftDockWidgetArea)
@@ -112,6 +118,9 @@ class MainWindow(QMainWindow):
         calibration_aids_widget.waveformToggled.connect(
             self.image_frame.set_waveform_mode
         )
+        calibration_aids_widget.singleImageViewerToggled.connect(
+            self.image_frame.set_single_image_viewer
+        )
         calibration_aids_dock = self._add_dock(
             "ASLM Calibration Aids", calibration_aids_widget, Qt.LeftDockWidgetArea
         )
@@ -148,6 +157,8 @@ class MainWindow(QMainWindow):
             "down_ramp_low_voltage",
             "up_ramp_high_voltage",
             "up_ramp_low_voltage",
+            "down_ramp_offset",
+            "up_ramp_offset",
             "camera_trigger_frequency",
         ):
             value = self._settings.value(f"calibration/{name}")
@@ -202,6 +213,8 @@ class MainWindow(QMainWindow):
             "down_ramp_low_voltage",
             "up_ramp_high_voltage",
             "up_ramp_low_voltage",
+            "down_ramp_offset",
+            "up_ramp_offset",
             "camera_trigger_frequency",
         ):
             self._settings.setValue(

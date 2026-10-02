@@ -24,7 +24,7 @@ def run(configs=None):
     DAQ, stage, MDA, mmc = setup_classes(configs)
     app = QApplication(sys.argv) 
     window = MainWindow(mmc, DAQ, stage, MDA)
-    window.showMaximized()
+    window.show()
     print("about to start event loop")
     result = app.exec()
     print("app.exec() returned:", result)

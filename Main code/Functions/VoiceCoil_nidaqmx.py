@@ -96,6 +96,7 @@ class VoiceCoil_nidaqmx:
         self._task_co = None
         self._task_co1 = None
         self._task_ao = None
+        self._task_live_ao = None
         self._task_do = None
         self._task_do_488 = None
         self._task_do_561 = None
@@ -267,6 +268,33 @@ class VoiceCoil_nidaqmx:
                 self._blank.write(False, auto_start=True)
             except Exception as exc:
                 print(f"Could not stop live blanking: {exc}")
+
+    def ensure_live_ao_task(self):
+        """Create a dedicated AO task for the static live voltage on ao0."""
+        if self._task_live_ao is None:
+            self._task_live_ao = nidaqmx.Task()
+            self._all_tasks.append(self._task_live_ao)
+            ao_address = f"{self._dev_name.rstrip('/')}/{self._address_ao_mirror}"
+            self._task_live_ao.ao_channels.add_ao_voltage_chan(ao_address)
+        return self._task_live_ao
+
+    def set_live_ao_voltage(self, voltage: float):
+        """Write a static voltage to the live AO task and start it if needed."""
+        task = self.ensure_live_ao_task()
+        task.write(float(voltage), auto_start=True)
+
+    def stop_live_ao_voltage(self):
+        """Stop and close the static live AO task."""
+        task = self._task_live_ao
+        if task is None:
+            return
+        with contextlib.suppress(Exception):
+            task.stop()
+        with contextlib.suppress(Exception):
+            task.close()
+        with contextlib.suppress(ValueError):
+            self._all_tasks.remove(task)
+        self._task_live_ao = None
 
     # ------------------------------------------------------------------
     # Shared plumbing for the two waveform programs
